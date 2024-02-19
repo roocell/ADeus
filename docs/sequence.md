@@ -1,3 +1,6 @@
+# ADeus overall sequence (simplified)
+
+```plantuml
 @startuml ADeus
 title ADeus
 autonumber
@@ -35,3 +38,4 @@ supabase -> chatbot : response
 chatbot -> user : response
 
 @enduml
+```
