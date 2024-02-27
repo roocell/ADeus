@@ -7,17 +7,21 @@
 #include <alsa/asoundlib.h>
 #include <curl/curl.h>
 #include <fstream>
-#include "cxxopts.hpp"
 #include <chrono>
+#include <cassert>
 #include <filesystem>  // C++17 feature
+#include <FLAC/stream_encoder.h>
+
+// #include "cxxopts.hpp"
+
 
 #define DO_NOT_APPLY_GAIN 1.0
 
 // Assuming 4 bytes per sample for S32_LE format and mono audio
-int bytesPerSample = 4;
+int bytesPerSample = 2;
 short channels = 1;
 unsigned int sampleRate = 44100;
-int durationInSeconds = 60; // Duration you want to accumulate before sending
+int durationInSeconds = 10; // Duration you want to accumulate before sending
 int targetBytes = sampleRate * durationInSeconds * bytesPerSample * channels;
 int rc;
 float audio_gain = DO_NOT_APPLY_GAIN;
@@ -150,7 +154,30 @@ void createWavHeader(std::vector<char> &header, int bitsPerSample, int dataSize 
     header.insert(header.end(), dataSizeBytes, dataSizeBytes + 4);
 }
 
-void saveWavToFile(const std::vector<char> &buffer) {
+// Callback for the FLAC encoder to write encoded data
+FLAC__StreamEncoderWriteStatus write_callback(const FLAC__StreamEncoder *encoder, const FLAC__byte buffer[], size_t bytes, unsigned samples, unsigned current_frame, void *client_data)
+{
+    std::vector<char> *outBuffer = static_cast<std::vector<char> *>(client_data);
+    outBuffer->insert(outBuffer->end(), buffer, buffer + bytes);
+    return FLAC__STREAM_ENCODER_WRITE_STATUS_OK;
+}
+
+// Callback for the FLAC encoder to seek -- not used but required
+FLAC__StreamEncoderSeekStatus seek_callback(const FLAC__StreamEncoder *encoder, FLAC__uint64 absolute_byte_offset, void *client_data)
+{
+    return FLAC__STREAM_ENCODER_SEEK_STATUS_UNSUPPORTED;
+}
+
+// Callback for the FLAC encoder to tell the current position -- not used but required
+FLAC__StreamEncoderTellStatus tell_callback(const FLAC__StreamEncoder *encoder, FLAC__uint64 *absolute_byte_offset, void *client_data)
+{
+    return FLAC__STREAM_ENCODER_TELL_STATUS_UNSUPPORTED;
+}
+
+
+void saveFlacToFile(const std::vector<char> &buffer)
+{
+    printf("mike\n");
     // Generate a timestamp for the filename
     auto now = std::chrono::system_clock::now();
     auto timestamp = std::chrono::system_clock::to_time_t(now);
@@ -162,22 +189,27 @@ void saveWavToFile(const std::vector<char> &buffer) {
     std::filesystem::create_directory("data");
 
     // Construct the filename with the timestamp
-    std::string filename = "data/" + timestampStr + "_audio.wav";
+    std::string filename = "data/" + timestampStr + "_audio.flac";
 
     // Write the buffer to the file
     std::ofstream outfile(filename, std::ios::binary);
-    if (outfile.is_open()) {
+    if (outfile.is_open())
+    {
         outfile.write(buffer.data(), buffer.size());
         outfile.close();
+    } else {
+        printf("failed to write file\n");
     }
 }
 
-void sendWavBuffer(const std::vector<char> &buffer)
+void sendFlacBuffer(const std::vector<char> &buffer)
 {
     if (save_to_local_file)
     {
-        saveWavToFile(buffer);
+        saveFlacToFile(buffer);
     }
+
+    return;
 
     CURL *curl;
     CURLcode res;
@@ -198,7 +230,7 @@ void sendWavBuffer(const std::vector<char> &buffer)
     {
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, ("Authorization: Bearer " + authToken).c_str());
-        headers = curl_slist_append(headers, "Content-Type: audio/wav");
+        headers = curl_slist_append(headers, "Content-Type: audio/flac");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -247,60 +279,79 @@ void handleAudioBuffer()
         // Process and send the accumulated data
         if (!dataChunk.empty())
         {
-            // Create the WAV header in memory
-            std::vector<char> wavHeader;
-            int bitsPerSample = 32;
-            int dataSize = dataChunk.size();
-            createWavHeader(wavHeader, bitsPerSample, dataSize);
+            std::vector<char> flacBuffer; // Buffer to hold encoded FLAC data
 
-            // Combine the header and the data into a single buffer
-            std::vector<char> wavBuffer;
-            wavBuffer.reserve(wavHeader.size() + dataSize);
-            wavBuffer.insert(wavBuffer.end(), wavHeader.begin(), wavHeader.end());
-            wavBuffer.insert(wavBuffer.end(), dataChunk.begin(), dataChunk.end());
+            FLAC__StreamEncoder *encoder = FLAC__stream_encoder_new();
+            if (encoder == nullptr)
+            {
+                std::cerr << "Failed to create FLAC encoder" << std::endl;
+                continue; // Skip this chunk
+            }
 
-            sendWavBuffer(wavBuffer);
+            FLAC__stream_encoder_set_channels(encoder, channels);
+            FLAC__stream_encoder_set_bits_per_sample(encoder, 16);
+            FLAC__stream_encoder_set_sample_rate(encoder, sampleRate);
+
+            FLAC__stream_encoder_init_stream(encoder, write_callback, seek_callback, tell_callback, nullptr, &flacBuffer);
+
+            // Convert the raw audio data to FLAC__int32 samples required by the FLAC encoder
+            if (dataChunk.size() / 2 * 4 < dataChunk.size() * sizeof(int16_t))
+            {
+                printf("sizes are wrong\n");
+                exit(0);
+            }
+
+            std::vector<FLAC__int32> pcm(dataChunk.size() / 2);
+            memcpy(&pcm[0], dataChunk.data(), pcm.size() * sizeof(FLAC__int32));
+
+            FLAC__stream_encoder_process_interleaved(encoder, pcm.data(), pcm.size() / channels);
+
+            FLAC__stream_encoder_finish(encoder);
+            FLAC__stream_encoder_delete(encoder);
+
+            // Now flacBuffer contains the encoded FLAC data, send it
+            sendFlacBuffer(flacBuffer);
         }
     }
 }
 
-void process_args(int argc, char* argv[]) {
-    cxxopts::Options options("main", " - command line options");
+// void process_args(int argc, char* argv[]) {
+//     cxxopts::Options options("main", " - command line options");
 
-    options.add_options()
-        ("h,help", "Print help")
-        ("s,save", "Save audio to local file")
-        ("g,gain", "Microphone gain (increase volume of audio)", cxxopts::value<float>())
-        ;
+//     options.add_options()
+//         ("h,help", "Print help")
+//         ("s,save", "Save audio to local file")
+//         ("g,gain", "Microphone gain (increase volume of audio)", cxxopts::value<float>())
+//         ;
 
-        auto result = options.parse(argc, argv);
+//         auto result = options.parse(argc, argv);
 
-        if (result.count("help")) {
-            std::cout << options.help() << std::endl;
-            exit(0);
-        }
+//         if (result.count("help")) {
+//             std::cout << options.help() << std::endl;
+//             exit(0);
+//         }
 
-        if (result.count("save")) {
-            std::cout << "Saving audio to local file" << std::endl;
-            save_to_local_file = true;
-        }
+//         if (result.count("save")) {
+//             std::cout << "Saving audio to local file" << std::endl;
+//             save_to_local_file = true;
+//         }
 
-        if (result.count("gain")) {
-            float gain = result["gain"].as<float>();
-            std::cout << "Microphone gain: " << gain << std::endl;
-            audio_gain = gain;
-        }
-}
+//         if (result.count("gain")) {
+//             float gain = result["gain"].as<float>();
+//             std::cout << "Microphone gain: " << gain << std::endl;
+//             audio_gain = gain;
+//         }
+// }
 
 int main(int argc, char* argv[])
 {
-    process_args(argc, argv);
+    // process_args(argc, argv);
     snd_pcm_t *capture_handle;
-    snd_pcm_format_t format = SND_PCM_FORMAT_S32_LE;
+    snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
 
     // Open PCM device for recording
     rc = snd_pcm_open(&capture_handle, "default", SND_PCM_STREAM_CAPTURE, 0);
-    assert(rc >= 0);
+    //assert(rc >= 0);
     if (rc < 0)
     {
         std::cerr << "Unable to open pcm device: " << snd_strerror(rc) << std::endl;

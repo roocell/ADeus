@@ -25,6 +25,25 @@ set_target_properties(main PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
+
+# Add compiler options for C and C++ separately
+add_compile_options(
+    # Add options for C compiler
+    $<$<COMPILE_LANGUAGE:C>: 
+        -ftime-report
+        # Add more C-specific compiler options here
+    >
+    # Add options for C++ compiler
+    $<$<COMPILE_LANGUAGE:CXX>: 
+        -ftime-report
+        # Add more C++-specific compiler options here
+    >
+)
+
+include_directories(/usr/include/FLAC)
+find_library(FLAC_LIBRARY FLAC PATHS /usr/lib/aarch64-linux-gnu REQUIRED)
+
+
 # Link against required libraries
 find_package(ALSA REQUIRED)
 find_package(CURL REQUIRED)
@@ -32,7 +51,8 @@ find_package(Threads REQUIRED)
 
 target_link_libraries(main PRIVATE
     ${ALSA_LIBRARIES}
-    ${CURL_LIBRARIES}
+    ${CURL_LIBRARIES} 
     Threads::Threads
     cxxopts
+    FLAC
 )
